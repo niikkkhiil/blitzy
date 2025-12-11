@@ -13,151 +13,80 @@ resource "azurerm_resource_group" "rg" {
   tags = var.tags
 }
 
-# Virtual Network
-resource "azurerm_virtual_network" "vnet" {
-  name = "${local.name_prefix}-vnet"
-  address_space = [var.vnet_cidr]
-  location = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  tags = var.tags
-}
-
-# K8s Subnet
-resource "azurerm_subnet" "k8s_subnet" {
-  name = "${local.name_prefix}-k8s-subnet"
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes = [var.k8s_subnet_cidr]
-  delegation {
-    name = "aks_delegation"
-    service_delegation {
-      name = "Microsoft.ContainerService/managedClusters"
-      actions = ["Microsoft.Network/virtualNetworks/subnets/action"]
-    }
-  }
-}
-
-#Azure Subnet
-resource "azurerm_subnet" "db" {
-    name = "${local.name_prefix}-db-subnet"
-    resource_group_name  = azurerm_resource_group.rg.name
-    virtual_network_name = azurerm_virtual_network.vnet.name
-    address_prefixes = [var.db_subnet_cidr]
-}
+# Networking Module
+module "networking" {
+  source = "./modules/networking"
   
-#Azure Subnet Redis
-resource "azurerm_subnet" "redis" {
-    name = "${local.name_prefix}-redis-subnet"
-    resource_group_name  = azurerm_resource_group.rg.name
-    virtual_network_name = azurerm_virtual_network.vnet.name
-    address_prefixes = [var.redis_subnet_cidr]
-}
-
-resource "azurerm_subnet" "shared" {
-  name = "${local.name_prefix}-snet-shared"
-  resource_group_name = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.vnet.name
-  address_prefixes = [var.shared_subnet_cidr]
-}
-
-# Nat gateway
-resource "azurerm_public_ip" "nat_ip" {
-  name = "${local.name_prefix}-nat-pip"
+  name_prefix = local.name_prefix
   location = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
-  allocation_method = "Static"
-  sku = "Standard"
-}
-
-resource "azurerm_nat_gateway" "nat" {
-  name = "${local.name_prefix}-nat"
-  location = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  sku_name = "Standard"
-}
-
-# Associate public IP with NAT gateway
-resource "azurerm_nat_gateway_public_ip_association" "nat_ip_assoc" {
-  nat_gateway_id = azurerm_nat_gateway.nat.id
-  public_ip_address_id = azurerm_public_ip.nat_ip.id
-}
-
-# Associate NAT gateway to k8s subnet
-resource "azurerm_subnet_nat_gateway_association" "k8s_nat_assoc" {
-  subnet_id = azurerm_subnet.k8s_subnet.id
-  nat_gateway_id = azurerm_nat_gateway.nat.id
-}
-
-# Network Security Groups
-resource "azurerm_network_security_group" "k8s_nsg" {
-  name = "${local.name_prefix}-k8s-nsg"
-  location = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  vnet_cidr = var.vnet_cidr
+  k8s_subnet_cidr = var.k8s_subnet_cidr
+  db_subnet_cidr = var.db_subnet_cidr
+  redis_subnet_cidr = var.redis_subnet_cidr
+  shared_subnet_cidr = var.shared_subnet_cidr
   tags = var.tags
 }
 
-resource "azurerm_network_security_group" "db_nsg" {
-  name = "${local.name_prefix}-db-nsg"
-  location = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+# ACR Module
+module "acr" {
+  source = "./modules/acr"
   
-  security_rule {
-    name = "AllowPostgreSQL"
-    priority = 100
-    direction = "Inbound"
-    access = "Allow"
-    protocol = "Tcp"
-    source_port_range = "*"
-    destination_port_range = "5432"
-    source_address_prefix = var.k8s_subnet_cidr
-    destination_address_prefix = "*"
-  }
+  registry_name = local.acr_name
+  location = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  sku = var.acr_sku
   tags = var.tags
 }
 
-resource "azurerm_network_security_group" "redis_nsg" {
-  name = "${local.name_prefix}-redis-nsg"
-  location = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+# AKS Module
+module "aks" {
+  source = "./modules/aks"
   
-  security_rule {
-    name = "AllowRedis"
-    priority = 100
-    direction = "Inbound"
-    access = "Allow"
-    protocol = "Tcp"
-    source_port_range = "*"
-    destination_port_range = "6380"
-    source_address_prefix = var.k8s_subnet_cidr
-    destination_address_prefix = "*"
-  }
-  tags = var.tags
-}
-
-resource "azurerm_network_security_group" "shared_nsg" {
-  name = "${local.name_prefix}-shared-nsg"
+  cluster_name = local.aks_name
+  name_prefix = local.name_prefix
   location = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
+  subnet_id = module.networking.k8s_subnet_id
+  kubernetes_version = var.kubernetes_version
+  node_count = var.aks_node_count
+  min_count = var.aks_min_count
+  max_count = var.aks_max_count
+  vm_size = var.aks_vm_size
+  service_cidr = var.aks_service_cidr
+  dns_service_ip = var.aks_dns_service_ip
+  acr_id = module.acr.registry_id
   tags = var.tags
 }
 
-# NSG Associations
-resource "azurerm_subnet_network_security_group_association" "k8s_nsg_assoc" {
-  subnet_id = azurerm_subnet.k8s_subnet.id
-  network_security_group_id = azurerm_network_security_group.k8s_nsg.id
+# PostgreSQL Module
+module "postgresql" {
+  source = "./modules/postgresql"
+  
+  server_name = local.postgres_name
+  location = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  subnet_id = module.networking.db_subnet_id
+  vnet_id = module.networking.vnet_id
+  postgres_version = var.postgres_version
+  admin_username = var.postgres_admin_username
+  admin_password = var.postgres_admin_password
+  storage_mb = var.postgres_storage_mb
+  sku_name = var.postgres_sku_name
+  tags = var.tags
 }
 
-resource "azurerm_subnet_network_security_group_association" "db_nsg_assoc" {
-  subnet_id = azurerm_subnet.db.id
-  network_security_group_id = azurerm_network_security_group.db_nsg.id
-}
-
-resource "azurerm_subnet_network_security_group_association" "redis_nsg_assoc" {
-  subnet_id = azurerm_subnet.redis.id
-  network_security_group_id = azurerm_network_security_group.redis_nsg.id
-}
-
-resource "azurerm_subnet_network_security_group_association" "shared_nsg_assoc" {
-  subnet_id = azurerm_subnet.shared.id
-  network_security_group_id = azurerm_network_security_group.shared_nsg.id
+# Redis Module
+module "redis" {
+  source = "./modules/redis"
+  
+  cache_name = local.redis_name
+  location = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  subnet_id = module.networking.redis_subnet_id
+  capacity = var.redis_capacity
+  family = var.redis_family
+  sku_name = var.redis_sku_name
+  private_ip = var.redis_private_ip
+  tags = var.tags
 }
